@@ -4,13 +4,13 @@
 
 (define *channel-buffer* #f)
 
-(define DEFAULT-CONFIG '([nick . "iforgottosetanick"]
+(define-constant DEFAULT-CONFIG '([nick . "iforgottosetanick"]
                          [port . 6667]
                          [user . "schemethingy"]
                          [channels . ()]
                          [real-name . "schemethingy"]))
 
-(define SERVER-PORT 5542)
+(define-constant SERVER-PORT 5542)
 
 (define *irc-configuration*
   '(
@@ -32,6 +32,19 @@
                    (irc:say conn "haha, you said butts"
                             (irc:message-receiver msg))))]))
 
+(define-record irc-connection conn config channels)
+
+(define (irc-connection conn config)
+  (make-irc-connection conn config (map->transient-map (persistent-map))))
+
+(define (add-scrollback-target conn target)
+  (unless (map-contains? (irc-connection-channels conn) target)
+    (map-add! (irc-connection-channels conn) target (channel-buffer 500))))
+
+(define (join-channel connection target)
+  (irc:join (irc-connection-conn connection) target)
+  (add-scrollback-target connection target))
+
 (define-record channel-buffer
   size
   buffer)
@@ -42,8 +55,9 @@
    (apply circular-list (make-list size #f))))
 
 (define (channel-buffer-append buf msg)
-  (set-car! buf msg)
-  (set! buf (cdr buf)))
+  (let ([buf (channel-buffer-buffer chanbuf)])
+    (set-car! buf msg)
+    (set! buf (cdr buf))))
 
 (define (make-connection config)
   (define ($ key . optional?) "Helper to get configuration values"
@@ -67,11 +81,12 @@
 
     (printf "Connecting to ~a (~A:~A)~n" name server port)
 
-    (let ((conn (irc:connection server: server
+    (let* ([conn (irc:connection server: server
                                 nick: nick
                                 real-name: real-name
                                 port: port
-                                user: user)))
+                                user: user)]
+           [connection (irc-connection conn config)])
 
       (for-each
        (lambda (handler)
@@ -98,7 +113,8 @@
 
       ;; Join some channels when we get 001
       (irc:add-message-handler! conn (lambda (_)
-                                       (for-each (cut irc:join conn <>) channels))
+                                       (for-each (cut join-channel connection <>)
+                                                 channels))
                                 code: 001)
 
       (irc:connect conn)
@@ -115,7 +131,9 @@
          (ex (i/o net)
              (irc:disconnect conn)
              (print-error-message ex (current-error-port))
-             (log "reconnecting ...")
+             (log "Disconnected, waiting ...")
+             (thread-sleep! 20)
+             (log "Reconnecting...")
              (irc:connect conn)
              (loop)))))))
 
