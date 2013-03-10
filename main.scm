@@ -1,36 +1,29 @@
 (use extras irc irregex posix persistent-hash-map srfi-1 srfi-2 srfi-18 srfi-26 tcp)
 
+(load "config.scm")
+
 (define *irc-connections* '())
 
 (define *channel-buffer* #f)
 
-(define-constant DEFAULT-CONFIG '([nick . "iforgottosetanick"]
-                         [port . 6667]
-                         [user . "schemethingy"]
-                         [channels . ()]
-                         [real-name . "schemethingy"]))
+(define-constant DEFAULT-NET-CONFIG
+  '([nick . "iforgottosetanick"]
+    [port . 6667]
+    [user . "schemethingy"]
+    [channels . ()]
+    [real-name . "schemethingy"]))
 
-(define-constant SERVER-PORT 5542)
+(define-constant DEFAULT-SERVER-CONFIG
+  '([port . 5555]))
 
-(define *irc-configuration*
-  '(
-    [(name     . "tenthbit")
-     (server   . "irc.tenthbit.net")
-     (nick     . "beepbopboop")
-     (channels . ("#spam" "#spam2"))]
+(define (server-conf key)
+  (cdr (or (assoc key *server-configuration*)
+           (assoc key DEFAULT-SERVER-CONFIG))))
 
-    [(name     . "tenthbit2")
-     (server   . "irc.tenthbit.net")
-     (nick     . "beepbopboop2")
-     (channels . ("#spam"))]))
+;; PASS <USER>:<PASSWORD>, for authenticating client connections
+(define PASS-REGEXP (irregex "^pass (.*?):(.*)$" 'i))
 
-(define *handlers*
-  '(
-    [(command  . "PRIVMSG")
-     (body     . "asdf")
-     (func     . (lambda (conn msg)
-                   (irc:say conn "haha, you said butts"
-                            (irc:message-receiver msg))))]))
+(define *handlers* '())
 
 (define-record irc-connection conn config channels)
 
@@ -60,13 +53,14 @@
     (set! buf (cdr buf))))
 
 (define (make-connection config)
-  (define ($ key . optional?) "Helper to get configuration values"
+  (define ($ key . optional?)
+    "Helper to get configuration values"
     (let ((value (assoc key config)))
       (if value
           (cdr value)
           (if (null? optional?)
               (error (sprintf "required value for ~A" key))
-              (cdr (assoc key DEFAULT-CONFIG))))))
+              (cdr (assoc key DEFAULT-NET-CONFIG))))))
 
   (let ((name      ($ 'name))
         (server    ($ 'server))
@@ -82,10 +76,10 @@
     (printf "Connecting to ~a (~A:~A)~n" name server port)
 
     (let* ([conn (irc:connection server: server
-                                nick: nick
-                                real-name: real-name
-                                port: port
-                                user: user)]
+                                 nick: nick
+                                 real-name: real-name
+                                 port: port
+                                 user: user)]
            [connection (irc-connection conn config)])
 
       (for-each
@@ -137,51 +131,66 @@
              (irc:connect conn)
              (loop)))))))
 
-(define (connect-networks)
-  (set! *irc-connections* (map (lambda (conf) (make-thread (lambda () (make-connection conf)))) *irc-configuration*))
+(define (connect-to-networks)
+  (set! *irc-connections*
+        (map (lambda (conf) (make-thread
+                             (lambda () (make-connection conf))))
+             *net-configuration*))
+
   (for-each thread-start! *irc-connections*)
   (for-each thread-join! *irc-connections*))
 
-
 (define (handle-client in out)
-  (define PASS-REGEXP (irregex "^pass (.*?):(.*)$" 'i))
-
   (write-line "identify yourself" out)
   (condition-case
    (let loop ()
      (let* ([line (read-line in)]
-            [match (irregex-match PASS-REGEXP line)])
+            [match (if (equal? line #!eof)
+                       #f
+                       (irregex-match PASS-REGEXP line))])
 
        (printf "~a~n" line)
 
        (if match
-           (let ([user (irregex-match-substring match 1)]
-                 [pass (irregex-match-substring match 2)])
-             (printf "Trying to log in with ~a, ~a ~n" user pass))
+           (let ([try-user (irregex-match-substring match 1)]
+                 [try-pass (irregex-match-substring match 2)])
+             (for-each
+              (lambda (conf)
+                (let* ([login (cdr (assoc 'login conf))]
+                       [user   (cdr (assoc 'user login))]
+                       [pass   (cdr (assoc 'pass login))])
+                  (when (and (equal? user try-user)
+                             (equal? pass try-pass))
+                    (write-line "yeah!" out))))
+
+              *net-configuration*)
+
+             (write-line "Nope." out))
            (write-line "Hey, you need to login first" out))
 
-       (unless (equal? line #!eof )
+       (unless (equal? line #!eof)
          (loop))))
-   (ex (i/o net timeout)
+
+   (ex (i/o net)
        (close-input-port in)
        (close-output-port out)
        (display "Client timed out\n"))))
 
 (define (start-server)
-  (let ([sock (tcp-listen SERVER-PORT)])
+  (let* ([port (server-conf 'port)]
+         [sock (tcp-listen port)])
     (tcp-read-timeout #f)
 
     (display "Spinning up server...\n")
     (let loop ()
-        (let-values (((in out) (tcp-accept sock)))
-          (thread-start! (lambda () (handle-client in out))))
+      (let-values (((in out) (tcp-accept sock)))
+        (thread-start! (lambda () (handle-client in out))))
       (loop))
 
     (display "Shutting down server...\n")
     (tcp-close sock)))
 
-
 (let ([server-thread (thread-start! (lambda ()  (start-server)))]
-      [clients-thread (thread-start! (lambda () (connect-networks)))])
+      [clients-thread (thread-start! (lambda () (connect-to-networks)))])
 
   (thread-join! clients-thread))
