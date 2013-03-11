@@ -14,7 +14,8 @@
     [real-name . "schemethingy"]))
 
 (define-constant DEFAULT-SERVER-CONFIG
-  '([port . 5555]))
+  '([port . 5555]
+    [timeout . 15]))
 
 (define (server-conf key)
   (cdr (or (assoc key *server-configuration*)
@@ -144,7 +145,8 @@
   (write-line "identify yourself" out)
   (condition-case
    (let loop ()
-     (let* ([line (read-line in)]
+     (let* ([timeout (server-conf 'timeout)]
+            [line (read-line in)]
             [match (if (equal? line #!eof)
                        #f
                        (irregex-match PASS-REGEXP line))])
@@ -165,7 +167,11 @@
 
               *net-configuration*)
 
-             (write-line "Nope." out))
+             (write-line (format "Nope, try again in ~a seconds"
+                                 timeout) out)
+             ;; Stupid simple rate limiting. Can be abused by opening
+             ;; a new connection.
+             (thread-sleep! timeout))
            (write-line "Hey, you need to login first" out))
 
        (unless (equal? line #!eof)

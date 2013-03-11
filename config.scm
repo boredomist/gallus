@@ -16,4 +16,5 @@
                  [pass . "beep2"]))]))
 
 (define *server-configuration*
-  '([port . 5555]))
+  '([port . 5555]
+    [timeout . 10]))
