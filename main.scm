@@ -2,8 +2,8 @@
 
 (load "config.scm")
 
-(define *irc-connections* '())
-
+(define *irc-connections* (map->transient-map (persistent-map)))
+(define *irc-threads* '())
 (define *channel-buffer* #f)
 
 (define-constant DEFAULT-NET-CONFIG
@@ -26,18 +26,33 @@
 
 (define *handlers* '())
 
-(define-record irc-connection conn config channels)
+(define-record irc-connection conn config channels clients)
 
 (define (irc-connection conn config)
-  (make-irc-connection conn config (map->transient-map (persistent-map))))
+  (make-irc-connection conn config (map->transient-map (persistent-map)) '()))
 
-(define (add-scrollback-target conn target)
+(define (add-scrollback-target! conn target)
   (unless (map-contains? (irc-connection-channels conn) target)
     (map-add! (irc-connection-channels conn) target (channel-buffer 500))))
 
-(define (join-channel connection target)
+(define (join-channel! connection target)
   (irc:join (irc-connection-conn connection) target)
-  (add-scrollback-target connection target))
+  (add-scrollback-target! connection target))
+
+(define (add-client! connection in out)
+  (let ([clients (irc-connection-clients connection)])
+    (irc-connection-clients-set! connection
+                                 ;; Well this can't be right...
+                                 (append clients (list (list in out))))))
+
+;; Send a message to each connected client
+(define (dispatch-message connection msg)
+  (let ([clients (irc-connection-clients connection)])
+    (for-each
+     (lambda (client)
+       (let ([out (cadr client)])
+         (write-line (format "~A" (irc:message-body msg)) out)))
+     clients)))
 
 (define-record channel-buffer
   size
@@ -108,11 +123,13 @@
 
       ;; Join some channels when we get 001
       (irc:add-message-handler! conn (lambda (_)
-                                       (for-each (cut join-channel connection <>)
+                                       (for-each (cut join-channel! connection <>)
                                                  channels))
                                 code: 001)
 
       (irc:connect conn)
+
+      (map-add! *irc-connections* name connection)
 
       (let loop ()
         (condition-case
@@ -120,6 +137,9 @@
          (let message-loop ()
            (let ([msg (irc:wait conn)])
              (irc:process-message conn msg)
+
+             (dispatch-message connection msg)
+
              (log "~a" (irc:message-body msg)))
            (message-loop))
 
@@ -133,15 +153,32 @@
              (loop)))))))
 
 (define (connect-to-networks)
-  (set! *irc-connections*
+  (set! *irc-threads*
         (map (lambda (conf) (make-thread
                              (lambda () (make-connection conf))))
              *net-configuration*))
 
-  (for-each thread-start! *irc-connections*)
-  (for-each thread-join! *irc-connections*))
+  (for-each thread-start! *irc-threads*)
+  (for-each thread-join! *irc-threads*))
 
-(define (handle-client in out)
+(define (begin-client-loop config in out)
+  (let* ([name (cdr (assoc 'name config))]
+         [conn (map-ref *irc-connections* name)]
+         [irc (irc-connection-conn conn)])
+
+    (add-client! conn in out)
+
+    (let loop ()
+      (let ([line (read-line in)])
+        (if (irc:connected? irc)
+            ;; We may want to gobble the line for our own greedy purposes
+            (cond
+             ((string-prefix? "USER" line) #f)
+             (else (irc:command irc line)))
+            (write-line "Seems you're not connected" out)))
+      (loop))))
+
+(define (handle-client in out return)
   (write-line "identify yourself" out)
   (condition-case
    (let loop ()
@@ -163,7 +200,7 @@
                        [pass   (cdr (assoc 'pass login))])
                   (when (and (equal? user try-user)
                              (equal? pass try-pass))
-                    (write-line "yeah!" out))))
+                    (return conf))))
 
               *net-configuration*)
 
@@ -190,7 +227,12 @@
     (display "Spinning up server...\n")
     (let loop ()
       (let-values (((in out) (tcp-accept sock)))
-        (thread-start! (lambda () (handle-client in out))))
+        (thread-start!
+         (lambda ()
+           (let ([return (lambda (conf)
+                           (write-line "Hey, thanks for authenticating, guy" out)
+                           (begin-client-loop conf in out))])
+             (handle-client in out return)))))
       (loop))
 
     (display "Shutting down server...\n")
