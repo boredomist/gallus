@@ -2,7 +2,7 @@
 
 (load "config.scm")
 
-(define *irc-connections* (map->transient-map (persistent-map)))
+(define *irc-connections* (persistent-map))
 (define *irc-threads* '())
 (define *channel-buffer* #f)
 
@@ -29,11 +29,14 @@
 (define-record irc-connection conn config channels clients)
 
 (define (irc-connection conn config)
-  (make-irc-connection conn config (map->transient-map (persistent-map)) '()))
+  (make-irc-connection conn config (persistent-map) '()))
 
 (define (add-scrollback-target! conn target)
   (unless (map-contains? (irc-connection-channels conn) target)
-    (map-add! (irc-connection-channels conn) target (channel-buffer 500))))
+    ;; I feel dirty.
+    (let ([tm (map->transient-map (irc-connection-channels conn))])
+      (map-add! tm target (channel-buffer 500))
+      (irc-connection-channels-set! conn (persist-map! tm)))))
 
 (define (join-channel! connection target)
   (irc:join (irc-connection-conn connection) target)
@@ -129,7 +132,9 @@
 
       (irc:connect conn)
 
-      (map-add! *irc-connections* name connection)
+      (let ([tm (map->transient-map *irc-connections*)])
+        (map-add! tm name connection)
+        (set! *irc-connections* (persist-map! tm)))
 
       (let loop ()
         (condition-case
@@ -164,16 +169,29 @@
 (define (begin-client-loop config in out)
   (let* ([name (cdr (assoc 'name config))]
          [conn (map-ref *irc-connections* name)]
-         [irc (irc-connection-conn conn)])
+         [irc (irc-connection-conn conn)]
+         [targets (irc-connection-channels conn)])
 
     (add-client! conn in out)
 
+    (map-each (lambda (target buffer)
+                ;; This isn't how you make a client connect.
+                (write-line (format ":pleasejointhechannel JOIN :~a" target) out)
+                (when (irc:connected? irc) (irc:command irc (format "NAMES ~a" target))))
+
+              targets)
+
     (let loop ()
-      (let ([line (read-line in)])
+      (let* ([line (read-line in)]
+             [prefix? (lambda (str) (string-prefix? str line))])
         (if (irc:connected? irc)
             ;; We may want to gobble the line for our own greedy purposes
             (cond
-             ((string-prefix? "USER" line) #f)
+             ((prefix? "USER") #f)
+             ((prefix? "CAP")  #f)
+             ((prefix? "QUIT") #f)
+             ((prefix? "PONG") #f)
+
              (else (irc:command irc line)))
             (write-line "Seems you're not connected" out)))
       (loop))))
