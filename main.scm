@@ -75,7 +75,7 @@
   name
   buffer
   users
-  title
+  topic
   modes)
 
 (define (channel name)
@@ -177,7 +177,6 @@
                  (channel-users-set! channel (string-split users " ")))))))
        code: 353)
 
-
       ;; TODO: JOIN/PART handling is pretty messy, need to rewrite eventually
       ;; When we get a PART, update the users list
       (irc:add-message-handler!
@@ -219,6 +218,21 @@
                                  (append (channel-users channel) (list nick))))))
 
        command: "JOIN")
+
+      ;; Channel topic
+      (irc:add-message-handler!
+       conn
+       (lambda (msg)
+         (let ([channels (irc-connection-channels connection)]
+               [match (irregex-match (irregex ".*? (#.*?) :(.*)")
+                                     (irc:message-body msg))])
+           (unless (null? match)
+             (let* ([target (irregex-match-substring match 1)]
+                    [topic  (irregex-match-substring match 2)]
+                    [channel (map-ref channels target)])
+               (when channel
+                 (channel-topic-set! channel topic))))))
+       code: 332)
 
       (irc:connect conn)
 
@@ -290,9 +304,9 @@
     (send-as-server (format "001 ~a :- Welcome to Gallus" nick) out)
 
     (map-each (lambda (target channel)
-                (write-line target)
                 ;; Avoid JOINing conversations with other people
                 (when (string-prefix? "#" target)
+
                   ;; TODO: Better (actual) mask parsing
                   (write-line (format ":~a!your@mask.todo JOIN :~a" nick target)
                               out)
@@ -305,8 +319,12 @@
 
                   (send-as-server (format "366 ~a: End of /NAMES list"
                                           target)
-                                  out))
+                                  out)
 
+                  ;; Set the topic
+                  (send-as-server (format "332 ~a ~a :~a" nick target
+                                          (channel-topic channel))
+                                  out))
 
                 ;; Replay scrollback
                 (let ([scrollback (drop-while (cut equal? #f <>)
