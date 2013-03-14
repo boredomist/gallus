@@ -15,7 +15,12 @@
 
 (define-constant DEFAULT-SERVER-CONFIG
   '([port . 5555]
-    [timeout . 15]))
+    [timeout . 15]
+    [hostname . "gallus.scm"]))
+
+;; Send something as the IRC server
+(define (send-as-server msg out)
+  (write-line (format ":~a ~a" (server-conf 'hostname) msg) out))
 
 (define (server-conf key)
   (cdr (or (assoc key *server-configuration*)
@@ -152,9 +157,32 @@
              (irc:disconnect conn)
              (print-error-message ex (current-error-port))
              (log "Disconnected, waiting ...")
-             (thread-sleep! 20)
+             (thread-sleep! 40)
              (log "Reconnecting...")
              (irc:connect conn)
+             (loop))
+
+         (ex (irc/eof)
+             (irc:disconnect conn)
+             (log "Received eof from server...")
+             (thread-sleep! 40)
+             (log "Reconnecting...")
+             (irc:connect con)
+             (loop))
+
+         (ex (irc)
+             (let ([code (get-condition-property ex 'irc 'code)]
+                   [msg (get-condition-property ex 'exn 'message)])
+               (printf "Caught exception ~a: ~a~n" code msg)
+               (case code
+
+                 ;; TODO: Do actual uniquifying of nick instead of just
+                 ;; defaulting to this.
+                 [(433) (irc:command conn "NICK my_nick_was_stolen")]
+                 [(421) (printf "Seems we used an unknown command")]
+                 [else  (printf "Don't know how to handle ~a, assuming we're still afloat~n"
+                                code)]))
+
              (loop)))))))
 
 (define (connect-to-networks)
@@ -170,30 +198,37 @@
   (let* ([name (cdr (assoc 'name config))]
          [conn (map-ref *irc-connections* name)]
          [irc (irc-connection-conn conn)]
-         [targets (irc-connection-channels conn)])
+         [targets (irc-connection-channels conn)]
+         [nick (irc:connection-nick irc)])
+
+    (send-as-server (format "001 ~a :- Welcome to Gallus"
+                            nick) out)
 
     (add-client! conn in out)
 
     (map-each (lambda (target buffer)
-                ;; This isn't how you make a client connect.
-                (write-line (format ":pleasejointhechannel JOIN :~a" target) out)
-                (when (irc:connected? irc) (irc:command irc (format "NAMES ~a" target))))
+                ;; TODO: Better (actual) mask parsing
+                (write-line (format ":~a!your@mask.todo JOIN :~a" nick target)
+                            out)
+                ;; TODO: Store this instead of querying each time.
+                (when (irc:connected? irc)
+                  (irc:command irc (format "NAMES ~a" target))))
 
               targets)
 
     (let loop ()
       (let* ([line (read-line in)]
              [prefix? (lambda (str) (string-prefix? str line))])
-        (if (irc:connected? irc)
+        (if (and (irc:connected? irc)
+                 (not (equal? line #!eof)))
             ;; We may want to gobble the line for our own greedy purposes
-            (cond
-             ((prefix? "USER") #f)
-             ((prefix? "CAP")  #f)
-             ((prefix? "QUIT") #f)
-             ((prefix? "PONG") #f)
+            (unless (or (prefix? "USER")
+                        (prefix? "CAP")
+                        (prefix? "QUIT")
+                        (prefix? "PONG"))
+              (irc:command irc line))
 
-             (else (irc:command irc line)))
-            (write-line "Seems you're not connected" out)))
+            (send-as-server "ERROR :You're not connected to a server!" out)))
       (loop))))
 
 (define (handle-client in out return)
