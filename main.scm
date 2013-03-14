@@ -59,7 +59,7 @@
                                  (append clients (list (cons in out))))))
 
 ;; Send a message to each connected client
-(define (dispatch-message connection msg)
+(define (dispatch-string connection str)
   (let ([clients (irc-connection-clients connection)])
     (for-each
      (lambda (client)
@@ -68,8 +68,11 @@
          (if (any port-closed? (list in out))
              ;; TODO: remove closed ports from list
              '()
-             (write-line (format "~A" (irc:message-body msg)) out))))
+             (write-line str out))))
      clients)))
+
+(define (dispatch-message connection msg)
+  (dispatch-string connection (format "~A" msg)))
 
 (define-record channel
   name
@@ -273,7 +276,7 @@
              (let ([code (get-condition-property ex 'irc 'code)]
                    [msg (get-condition-property ex 'exn 'message)])
                (printf "Caught exception ~a: ~a~n" code msg)
-               (dispatch-message connection msg)
+               (dispatch-string connection msg)
                (case code
 
                  ;; TODO: Do actual uniquifying of nick instead of just
