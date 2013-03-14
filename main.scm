@@ -72,7 +72,7 @@
      clients)))
 
 (define (dispatch-message connection msg)
-  (dispatch-string connection (format "~A" msg)))
+  (dispatch-string connection (format "~A" (irc:message-body msg))))
 
 (define-record channel
   name
@@ -162,7 +162,9 @@
          (let* ([target (irc:message-receiver msg)]
                 [channel (add-scrollback-target! connection target)])
            (write-line (format "pushing ~a to ~a" (irc:message-body msg) target))
-           (channel-push! channel (irc:message-body msg))))
+           (channel-push! channel (cons (irc:message-body msg)
+                                        (seconds->string
+                                         (irc:message-timestamp msg))))))
        command: "PRIVMSG")
 
       ;; Store users currently on channel
@@ -335,7 +337,10 @@
                                                     BUFFER-SIZE))])
                   (for-each
                    (lambda (line)
-                     (write-line (format "~a [TODO: TIMESTAMP HERE]" line) out))
+                     (let ([msg (car line)]
+                           [time (cdr line)])
+                       (write-line (format "~a [~a]" msg time)
+                                   out)))
                    scrollback)))
 
               targets)
