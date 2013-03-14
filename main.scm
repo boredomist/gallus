@@ -161,6 +161,21 @@
            (channel-push! channel (irc:message-body msg))))
        command: "PRIVMSG")
 
+      ;; Store users currently on channel
+      (irc:add-message-handler!
+       conn
+       (lambda (msg)
+         (let ([channels (irc-connection-channels connection)]
+               [match (irregex-match (irregex ".*? (#.*?) :(.*)")
+                                     (irc:message-body msg))])
+           (unless (null? match)
+             (let* ([target (irregex-match-substring match 1)]
+                    [users  (irregex-match-substring match 2)]
+                    [channel (map-ref channels target)])
+               (when channel
+                 (channel-users-set! channel (string-split users " ")))))))
+       code: 353)
+
       (irc:connect conn)
 
       (let ([tm (map->transient-map *irc-connections*)])
@@ -240,7 +255,7 @@
 
                   ;; Send out NAMES
                   (send-as-server
-                   (format "353 ~a: ~a" target
+                   (format "353 ~a @ ~a :~a" nick target
                            (string-join (channel-users channel) " "))
                    out)
 
