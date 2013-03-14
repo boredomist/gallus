@@ -49,6 +49,7 @@
 
 (define (join-channel! connection target)
   (irc:join (irc-connection-conn connection) target)
+  ;; TODO: add self to users list
   (add-scrollback-target! connection target))
 
 (define (add-client! connection in out)
@@ -175,6 +176,49 @@
                (when channel
                  (channel-users-set! channel (string-split users " ")))))))
        code: 353)
+
+
+      ;; TODO: JOIN/PART handling is pretty messy, need to rewrite eventually
+      ;; When we get a PART, update the users list
+      (irc:add-message-handler!
+       conn
+       (lambda (msg)
+         (let* ([nick (irc:message-sender msg)]
+                [target (irc:message-receiver msg)]
+                [channel (map-ref (irc-connection-channels connection) target)])
+
+           (when channel
+             (channel-users-set! channel (filter (lambda (user)
+                                                   (any (cut equal? nick <>)
+                                                        (map (lambda (prefix)
+                                                               (format "~a~a" prefix user))
+                                                             '("" "+" "@"))))
+                                          (channel-users channel))))))
+       command: "PART")
+
+
+      ;; Ditto for JOINs
+      ;; FIXME: Self not added to channel list
+      (irc:add-message-handler!
+       conn
+       (lambda (msg)
+         (let* ([nick (irc:message-sender msg)]
+                [target (irc:message-receiver msg)]
+                [channel (map-ref (irc-connection-channels connection) target)])
+           (when
+               (and channel
+                    (not (any
+                          (lambda (user)
+                            (any (cut equal? nick <>)
+                                 (list user (string-append "+" user)
+                                       (string-append "+" user))))
+
+                          (channel-users channel))))
+
+             (channel-users-set! channel
+                                 (append (channel-users channel) (list nick))))))
+
+       command: "JOIN")
 
       (irc:connect conn)
 
