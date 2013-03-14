@@ -18,6 +18,8 @@
     [timeout . 15]
     [hostname . "gallus.scm"]))
 
+(define-constant BUFFER-SIZE 500)
+
 ;; Send something as the IRC server
 (define (send-as-server msg out)
   (write-line (format ":~a ~a" (server-conf 'hostname) msg) out))
@@ -40,8 +42,10 @@
   (unless (map-contains? (irc-connection-channels conn) target)
     ;; I feel dirty.
     (let ([tm (map->transient-map (irc-connection-channels conn))])
-      (map-add! tm target (channel-buffer 500))
-      (irc-connection-channels-set! conn (persist-map! tm)))))
+      (map-add! tm target (channel target))
+      (irc-connection-channels-set! conn (persist-map! tm))))
+
+  (map-ref (irc-connection-channels conn) target))
 
 (define (join-channel! connection target)
   (irc:join (irc-connection-conn connection) target)
@@ -51,30 +55,41 @@
   (let ([clients (irc-connection-clients connection)])
     (irc-connection-clients-set! connection
                                  ;; Well this can't be right...
-                                 (append clients (list (list in out))))))
+                                 (append clients (list (cons in out))))))
 
 ;; Send a message to each connected client
 (define (dispatch-message connection msg)
   (let ([clients (irc-connection-clients connection)])
     (for-each
      (lambda (client)
-       (let ([out (cadr client)])
-         (write-line (format "~A" (irc:message-body msg)) out)))
+       (let ([in  (car client)]
+             [out (cdr client)])
+         (if (any port-closed? (list in out))
+             ;; TODO: remove closed ports from list
+             '()
+             (write-line (format "~A" (irc:message-body msg)) out))))
      clients)))
 
-(define-record channel-buffer
-  size
-  buffer)
+(define-record channel
+  name
+  buffer
+  users
+  title
+  modes)
 
-(define (channel-buffer size)
-  (make-channel-buffer
-   size
-   (apply circular-list (make-list size #f))))
+(define (channel name)
+  (make-channel
+   name                                             ; Channel name
+   (apply circular-list (make-list BUFFER-SIZE #f)) ; Scrollback
+   '()                                              ; Users
+   "No topic is set"                                ; Topic
+   ""                                               ; Channel modes
+   ))
 
-(define (channel-buffer-append buf msg)
-  (let ([buf (channel-buffer-buffer chanbuf)])
+(define (channel-push! chan msg)
+  (let ([buf (channel-buffer chan)])
     (set-car! buf msg)
-    (set! buf (cdr buf))))
+    (channel-buffer-set! chan (cdr buf))))
 
 (define (make-connection config)
   (define ($ key . optional?)
@@ -131,9 +146,20 @@
 
       ;; Join some channels when we get 001
       (irc:add-message-handler! conn (lambda (_)
+                                       ;; TODO: channel modes, users, topic, etc.
                                        (for-each (cut join-channel! connection <>)
                                                  channels))
                                 code: 001)
+
+      ;; Store PRIVMSGs to channel buffers
+      (irc:add-message-handler!
+       conn
+       (lambda (msg)
+         (let* ([target (irc:message-receiver msg)]
+                [channel (add-scrollback-target! connection target)])
+           (write-line (format "pushing ~a to ~a" (irc:message-body msg) target))
+           (channel-push! channel (irc:message-body msg))))
+       command: "PRIVMSG")
 
       (irc:connect conn)
 
@@ -174,6 +200,7 @@
              (let ([code (get-condition-property ex 'irc 'code)]
                    [msg (get-condition-property ex 'exn 'message)])
                (printf "Caught exception ~a: ~a~n" code msg)
+               (dispatch-message connection msg)
                (case code
 
                  ;; TODO: Do actual uniquifying of nick instead of just
@@ -201,20 +228,39 @@
          [targets (irc-connection-channels conn)]
          [nick (irc:connection-nick irc)])
 
-    (send-as-server (format "001 ~a :- Welcome to Gallus"
-                            nick) out)
+    (send-as-server (format "001 ~a :- Welcome to Gallus" nick) out)
 
-    (add-client! conn in out)
+    (map-each (lambda (target channel)
+                (write-line target)
+                ;; Avoid JOINing conversations with other people
+                (when (string-prefix? "#" target)
+                  ;; TODO: Better (actual) mask parsing
+                  (write-line (format ":~a!your@mask.todo JOIN :~a" nick target)
+                              out)
 
-    (map-each (lambda (target buffer)
-                ;; TODO: Better (actual) mask parsing
-                (write-line (format ":~a!your@mask.todo JOIN :~a" nick target)
-                            out)
-                ;; TODO: Store this instead of querying each time.
-                (when (irc:connected? irc)
-                  (irc:command irc (format "NAMES ~a" target))))
+                  ;; Send out NAMES
+                  (send-as-server
+                   (format "353 ~a: ~a" target
+                           (string-join (channel-users channel) " "))
+                   out)
+
+                  (send-as-server (format "366 ~a: End of /NAMES list"
+                                          target)
+                                  out))
+
+
+                ;; Replay scrollback
+                (let ([scrollback (drop-while (cut equal? #f <>)
+                                              (take (channel-buffer channel)
+                                                    BUFFER-SIZE))])
+                  (for-each
+                   (lambda (line)
+                     (write-line (format "~a [TODO: TIMESTAMP HERE]" line) out))
+                   scrollback)))
 
               targets)
+
+    (add-client! conn in out)
 
     (let loop ()
       (let* ([line (read-line in)]
