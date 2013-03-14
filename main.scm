@@ -422,7 +422,7 @@
     (display "Shutting down server...\n")
     (tcp-close sock)))
 
-(let ([server-thread (thread-start! (lambda ()  (start-server)))]
-      [clients-thread (thread-start! (lambda () (connect-to-networks)))])
+(let ([server-thread (thread-start! start-server)]
+      [clients-thread (thread-start! connect-to-networks)])
 
   (thread-join! clients-thread))
