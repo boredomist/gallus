@@ -266,7 +266,7 @@
       (let* ([line (read-line in)]
              [prefix? (lambda (str) (string-prefix? str line))])
         (if (and (irc:connected? irc)
-                 (not (equal? line #!eof)))
+                 (not (eof-object? line)))
             ;; We may want to gobble the line for our own greedy purposes
             (unless (or (prefix? "USER")
                         (prefix? "CAP")
@@ -283,7 +283,7 @@
    (let loop ()
      (let* ([timeout (server-conf 'timeout)]
             [line (read-line in)]
-            [match (if (equal? line #!eof)
+            [match (if (eof-object? line)
                        #f
                        (irregex-match PASS-REGEXP line))])
 
@@ -310,7 +310,7 @@
              (thread-sleep! timeout))
            (write-line "Hey, you need to login first" out))
 
-       (unless (equal? line #!eof)
+       (unless (eof-object? line)
          (loop))))
 
    (ex (i/o net)
