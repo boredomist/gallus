@@ -1,4 +1,5 @@
-(use extras irc irregex posix persistent-hash-map srfi-1 srfi-2 srfi-18 srfi-26 tcp)
+(use extras irc irregex posix persistent-hash-map srfi-1 srfi-2 srfi-18 srfi-26
+     tcp)
 
 (load "config.scm")
 
@@ -32,6 +33,20 @@
 (define PASS-REGEXP (irregex "^pass (.*?):(.*)$" 'i))
 
 (define *handlers* '())
+
+;; Define PRIVMSGs as a record to make formatting the scrollback a bit easier
+(define-record privmsg sender target message timestamp body)
+
+(define (privmsg msg)
+  (let* ([body (irc:message-body msg)]
+         [match (irregex-match (irregex ".*? PRIVMSG .*? :(.*)")
+                               body)])
+    (make-privmsg (irc:message-sender msg)
+                  (irc:message-receiver msg)
+                  (irregex-match-substring match 1)
+                  (seconds->string
+                   (irc:message-timestamp msg))
+                  body)))
 
 (define-record irc-connection conn config channels clients)
 
@@ -162,9 +177,7 @@
          (let* ([target (irc:message-receiver msg)]
                 [channel (add-scrollback-target! connection target)])
            (write-line (format "pushing ~a to ~a" (irc:message-body msg) target))
-           (channel-push! channel (cons (irc:message-body msg)
-                                        (seconds->string
-                                         (irc:message-timestamp msg))))))
+           (channel-push! channel (privmsg msg))))
        command: "PRIVMSG")
 
       ;; Store users currently on channel
@@ -336,10 +349,13 @@
                                               (take (channel-buffer channel)
                                                     BUFFER-SIZE))])
                   (for-each
-                   (lambda (line)
-                     (let ([msg (car line)]
-                           [time (cdr line)])
-                       (write-line (format "~a [~a]" msg time)
+                   (lambda (privmsg)
+                     (let ([sender (privmsg-sender privmsg)]
+                           [target (privmsg-target privmsg)]
+                           [timestamp (privmsg-timestamp privmsg)]
+                           [msg (privmsg-message privmsg)])
+                       (write-line (format ":~a PRIVMSG ~a :[~a] ~a"
+                                           sender target timestamp msg)
                                    out)))
                    scrollback)))
 
