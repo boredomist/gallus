@@ -312,6 +312,80 @@
   (for-each thread-start! *irc-threads*)
   (for-each thread-join! *irc-threads*))
 
+(define (send-scrollback-for-target target channel nick out)
+
+  ;; When we're replaying scrollback for a channel, not a nick
+  (when (string-prefix? "#" target)
+
+    ;; TODO: Better (actual) mask parsing
+    (write-line (format ":~a!your@mask.todo JOIN :~a" nick target)
+                out)
+
+    ;; Send out NAMES
+    (send-as-server
+     (format "353 ~a @ ~a :~a" nick target
+             (string-join (channel-users channel) " "))
+     out)
+
+    (send-as-server (format "366 ~a: End of /NAMES list"
+                            target)
+                    out)
+
+    ;; Set the topic
+    (send-as-server (format "332 ~a ~a :~a" nick target
+                            (channel-topic channel))
+                    out)))
+
+(define (handle-status-privmsg conn line out)
+  (let* ([irc (irc-connection-conn conn)]
+         [match (irregex-match (irregex ".*? :(.*)")
+                               line)]
+         [message (string-trim-both
+                   (if match
+                       (irregex-match-substring match 1)
+                       ""))]
+         [args (string-split message " ")]
+         [nick (irc:connection-nick irc)])
+
+    (define (send-as-status msg)
+      (write-line (format ":*status*!gallus@gallus.scm PRIVMSG ~a :~a" nick msg)
+                  out))
+
+    (if (equal? message "")
+        (send-as-status "How about specifying something to do, dingus?")
+        (send-as-status "I'll implement this eventually"))))
+
+(define (handle-renick conn line)
+  (let* ([irc (irc-connection-conn conn)]
+         [old-nick (irc:connection-nick irc)]
+         [match (irregex-match (irregex "NICK (.*)") line)]
+         [nick (if match (irregex-match-substring match 1) #f)])
+    (when (and nick
+               (not (equal? nick old-nick)))
+      (printf "Renaming from ~a to ~a~n" old-nick nick)
+      (irc:nick irc nick))))
+
+(define (handle-client-command conn line out)
+  (let* ([irc (irc-connection-conn conn)]
+         [cmd? (lambda (cmd) (string-prefix? cmd line))]
+         [match (irregex-match (irregex ".*? (.*)? .*") line)]
+         [arg   (if match
+                    (irregex-match-substring match 1)
+                    #f)])
+
+    (cond
+      [(cmd? "PRIVMSG") (if (equal? arg "*status*")
+                            (handle-status-privmsg conn line out)
+                            (irc:command irc line))]
+
+      [(cmd? "NICK") (handle-renick conn line)]
+
+      ;; TODO
+      ;; [(cmd? "JOIN") (handle-join conn line)]
+      ;; [(cmd? "PART") (handle-part conn line)]
+
+      [else (irc:command irc line)])))
+
 (define (begin-client-loop config in out)
   (let* ([name (cdr (assoc 'name config))]
          [conn (map-ref *irc-connections* name)]
@@ -321,45 +395,7 @@
 
     (send-as-server (format "001 ~a :- Welcome to Gallus" nick) out)
 
-    (map-each (lambda (target channel)
-                ;; Avoid JOINing conversations with other people
-                (when (string-prefix? "#" target)
-
-                  ;; TODO: Better (actual) mask parsing
-                  (write-line (format ":~a!your@mask.todo JOIN :~a" nick target)
-                              out)
-
-                  ;; Send out NAMES
-                  (send-as-server
-                   (format "353 ~a @ ~a :~a" nick target
-                           (string-join (channel-users channel) " "))
-                   out)
-
-                  (send-as-server (format "366 ~a: End of /NAMES list"
-                                          target)
-                                  out)
-
-                  ;; Set the topic
-                  (send-as-server (format "332 ~a ~a :~a" nick target
-                                          (channel-topic channel))
-                                  out))
-
-                ;; Replay scrollback
-                (let ([scrollback (drop-while (cut equal? #f <>)
-                                              (take (channel-buffer channel)
-                                                    BUFFER-SIZE))])
-                  (for-each
-                   (lambda (privmsg)
-                     (let ([sender (privmsg-sender privmsg)]
-                           [target (privmsg-target privmsg)]
-                           [timestamp (privmsg-timestamp privmsg)]
-                           [msg (privmsg-message privmsg)])
-                       (write-line (format ":~a PRIVMSG ~a :[~a] ~a"
-                                           sender target timestamp msg)
-                                   out)))
-                   scrollback)))
-
-              targets)
+    (map-each (cut send-scrollback-for-target <> <> nick out) targets)
 
     (add-client! conn in out)
 
@@ -368,18 +404,19 @@
              [prefix? (lambda (str) (string-prefix? str line))])
         (if (and (irc:connected? irc)
                  (not (eof-object? line)))
-            ;; We may want to gobble the line for our own greedy purposes
+
+            ;; We ignore some lines that the bouncer itself takes care of
             (unless (or (prefix? "USER")
                         (prefix? "CAP")
                         (prefix? "QUIT")
                         (prefix? "PONG"))
-              (irc:command irc line))
+              (handle-client-command conn line out))
 
             (send-as-server "ERROR :You're not connected to a server!" out)))
       (loop))))
 
 (define (handle-client in out return)
-  (write-line "identify yourself" out)
+  (write-line "Identify yourself" out)
   (condition-case
    (let loop ()
      (let* ([timeout (server-conf 'timeout)]
